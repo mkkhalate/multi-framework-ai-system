@@ -1,0 +1,16 @@
+{
+  "servers": [
+    {
+      "name": "filesystem",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/home/mayur/Desktop/ai"]
+    },
+    {
+      "name": "git",
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-git", "/home/mayur/Desktop/ai"]
+    }
+  ]
+}
