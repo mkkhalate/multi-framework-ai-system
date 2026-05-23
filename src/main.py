@@ -26,6 +26,11 @@ def _confirm_command(command: str, reason: str) -> bool:
     return answer in {"y", "yes"}
 
 
+def _ask_user_interaction(prompt: str) -> str:
+    print(f"\n[assistant] {prompt}")
+    return input("your response> ").strip()
+
+
 def _print_status(settings, mcp: MCPRegistry, tools: ToolRouter) -> None:
     print("\n=== System Status ===")
     print(f"Provider: {settings.provider}")
@@ -122,7 +127,12 @@ def run() -> None:
             runtime_context["last_shell_command"],
             len(runtime_context["last_written_files"]),
         )
-        state = orchestrator.run_goal(user_input, _confirm_command, context=runtime_context)
+        state = orchestrator.run_goal(
+            user_input,
+            _confirm_command,
+            ask_user_callback=_ask_user_interaction,
+            context=runtime_context,
+        )
         history_item = {"goal": user_input, "final_answer": state.final_answer, "steps": state.steps}
         history.append(history_item)
         memory.append_history(history_item)
@@ -139,7 +149,10 @@ def run() -> None:
                 if cmd:
                     memory.data["last_shell_command"] = cmd
                     break
-        memory.save()
+        try:
+            memory.save()
+        except OSError as exc:
+            runtime_logger.warning("memory_save_failed | error=%s", str(exc))
         runtime_logger.info("final_answer | content=%s", state.final_answer[:1200])
         runtime_logger.info(
             "memory_updated | last_project_dir=%s | last_shell_command=%s | last_written_files_count=%s",

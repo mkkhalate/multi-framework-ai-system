@@ -25,8 +25,12 @@ class MemoryStore:
             return
 
     def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.path.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.write_text(json.dumps(self.data, indent=2), encoding="utf-8")
+        except OSError:
+            # Do not crash the assistant when disk is full or storage is unavailable.
+            return
 
     def append_history(self, item: Dict[str, Any], max_items: int = 300) -> None:
         hist = self.data.setdefault("history", [])
@@ -39,4 +43,3 @@ class MemoryStore:
         if not isinstance(hist, list):
             return []
         return hist[-limit:]
-

@@ -1,7 +1,9 @@
-import os
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, List
+from duckduckgo_search import DDGS
+import requests
+from bs4 import BeautifulSoup
 
 
 class ToolRouter:
@@ -31,11 +33,18 @@ class ToolRouter:
                 timeout=300,
                 cwd=str(self.workspace_root),
             )
+            max_chars = 6000
+            stdout = (result.stdout or "")
+            stderr = (result.stderr or "")
+            if len(stdout) > max_chars:
+                stdout = stdout[:max_chars] + "...<truncated>"
+            if len(stderr) > max_chars:
+                stderr = stderr[:max_chars] + "...<truncated>"
             return {
                 "success": result.returncode == 0,
                 "exit_code": result.returncode,
-                "stdout": result.stdout,
-                "stderr": result.stderr,
+                "stdout": stdout,
+                "stderr": stderr,
             }
         except Exception as exc:
             return {"success": False, "error": str(exc)}
@@ -84,6 +93,84 @@ class ToolRouter:
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
+    def web_search(self, query: str, max_results: int = 5) -> Dict[str, Any]:
+        try:
+            if not query.strip():
+                return {"success": False, "error": "empty query"}
+            results = []
+            with DDGS() as ddgs:
+                for item in ddgs.text(query, max_results=max_results):
+                    if not isinstance(item, dict):
+                        continue
+                    results.append(
+                        {
+                            "title": item.get("title", ""),
+                            "url": item.get("href", ""),
+                            "snippet": item.get("body", ""),
+                        }
+                    )
+            return {"success": True, "output": results}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
+    def fetch_url(self, url: str, max_chars: int = 8000) -> Dict[str, Any]:
+        try:
+            if not url.startswith(("http://", "https://")):
+                return {"success": False, "error": "url must start with http:// or https://"}
+
+            resp = requests.get(
+                url,
+                timeout=25,
+                headers={
+                    "User-Agent": (
+                        "Mozilla/5.0 (X11; Linux x86_64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/124.0.0.0 Safari/537.36"
+                    )
+                },
+            )
+            resp.raise_for_status()
+
+            content_type = (resp.headers.get("content-type") or "").lower()
+            raw_text = ""
+            title = ""
+
+            if "text/html" in content_type or "<html" in resp.text.lower():
+                soup = BeautifulSoup(resp.text, "html.parser")
+                if soup.title and soup.title.string:
+                    title = soup.title.string.strip()
+                # Remove noisy tags before text extraction.
+                for tag in soup(["script", "style", "noscript", "svg", "header", "footer"]):
+                    tag.extract()
+                raw_text = " ".join(soup.get_text(separator=" ").split())
+            else:
+                raw_text = resp.text
+
+            extracted = raw_text[:max_chars]
+            return {
+                "success": True,
+                "output": {
+                    "url": url,
+                    "status_code": resp.status_code,
+                    "content_type": content_type,
+                    "title": title,
+                    "text": extracted,
+                    "truncated": len(raw_text) > max_chars,
+                    "total_chars": len(raw_text),
+                },
+            }
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
+    def reply(self, text: str) -> Dict[str, Any]:
+        try:
+            message = str(text).strip()
+            if not message:
+                return {"success": False, "error": "reply text is empty"}
+            return {"success": True, "output": message}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
     def capabilities(self) -> Dict[str, Any]:
         browser_use_repo = self.workspace_root / "integrations" / "browser-use"
         return {
@@ -92,7 +179,16 @@ class ToolRouter:
                 "workspace_root": str(self.workspace_root),
                 "file_scope_mode": self.file_scope_mode,
                 "operation_root": str(self.operation_root),
-                "tools": ["shell", "list_dir", "read_file", "write_file", "search_code"],
+                "tools": [
+                    "shell",
+                    "list_dir",
+                    "read_file",
+                    "write_file",
+                    "search_code",
+                    "web_search",
+                    "fetch_url",
+                    "reply",
+                ],
                 "browser_use_repo_present": browser_use_repo.exists(),
             },
         }

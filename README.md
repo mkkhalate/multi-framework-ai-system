@@ -69,6 +69,9 @@ ls -1 integrations
 - `read_file`
 - `write_file`
 - `search_code`
+- `web_search` (DuckDuckGo via `duckduckgo-search` / DDGS)
+- `fetch_url` (download + HTML text extraction)
+- `reply` (interactive text response/confirmation prompt)
 - `capabilities`
 
 ## Safety behavior

@@ -1,6 +1,9 @@
 import json
 import logging
-import re
+import os
+import platform
+import sys
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -38,9 +41,28 @@ class UnifiedOrchestrator:
             return text
         return text[:limit] + "...<truncated>"
 
-    def _system_prompt(self) -> str:
+    def _system_prompt(self, current_time_iso: str) -> str:
+        os_name = platform.system()
+        kernel = platform.release()
+        machine = platform.machine()
+        python_version = sys.version.split()[0]
+        shell = os.environ.get("SHELL", "unknown")
+        distro = "unknown"
+        try:
+            if os_name.lower() == "linux" and os.path.exists("/etc/os-release"):
+                with open("/etc/os-release", "r", encoding="utf-8") as f:
+                    content = f.read()
+                for line in content.splitlines():
+                    if line.startswith("PRETTY_NAME="):
+                        distro = line.split("=", 1)[1].strip().strip('"')
+                        break
+        except Exception:
+            distro = "unknown"
+
         return (
             "You are an autonomous system assistant. Return JSON only.\n"
+            f"Current local time (ISO): {current_time_iso}\n"
+            f"System details: os={os_name}, distro={distro}, kernel={kernel}, arch={machine}, python={python_version}, shell={shell}\n"
             "Action schema:\n"
             "{\"type\":\"answer\",\"content\":\"...\"}\n"
             "{\"type\":\"tool\",\"tool\":\"shell\",\"args\":{\"command\":\"...\"},\"reason\":\"...\"}\n"
@@ -48,67 +70,30 @@ class UnifiedOrchestrator:
             "{\"type\":\"tool\",\"tool\":\"read_file\",\"args\":{\"path\":\"...\"},\"reason\":\"...\"}\n"
             "{\"type\":\"tool\",\"tool\":\"write_file\",\"args\":{\"path\":\"...\",\"content\":\"...\"},\"reason\":\"...\"}\n"
             "{\"type\":\"tool\",\"tool\":\"search_code\",\"args\":{\"pattern\":\"...\",\"path\":\"...\"},\"reason\":\"...\"}\n"
+            "{\"type\":\"tool\",\"tool\":\"web_search\",\"args\":{\"query\":\"...\",\"max_results\":5},\"reason\":\"...\"}\n"
+            "{\"type\":\"tool\",\"tool\":\"fetch_url\",\"args\":{\"url\":\"...\",\"max_chars\":8000},\"reason\":\"...\"}\n"
+            "{\"type\":\"tool\",\"tool\":\"reply\",\"args\":{\"text\":\"...\",\"await_user\":false},\"reason\":\"...\"}\n"
             "{\"type\":\"tool\",\"tool\":\"capabilities\",\"args\":{},\"reason\":\"...\"}\n"
             "Rules: use tools when needed, then finish with type=answer.\n"
             "If the user asks to inspect files/directories/code, DO NOT answer directly first.\n"
-            "Run a relevant tool action before answering."
+            "Run a relevant tool action before answering.\n"
+            "For time-sensitive or 'current/latest/today/now' questions, use the current local time provided above and web_search when needed.\n"
+            "When web_search returns URLs, use fetch_url on relevant URLs before writing final conclusions.\n"
+            "Do not respond with capability disclaimers like 'I can't do this' without attempting at least one actionable tool or shell step first.\n"
+            "Use system-appropriate commands and package managers based on system details (e.g., avoid apt on Arch Linux)."
+            "Use reply tool when you want to explicitly ask the user a confirmation/question or return a direct interactive message."
         )
 
-    def _general_answer_prompt(self) -> str:
-        return (
-            "You are a helpful assistant for general questions. "
-            "Answer clearly and directly. Keep it concise unless detail is requested."
-        )
-
-    def _is_general_question(self, goal: str) -> bool:
-        g = goal.strip().lower()
-        if not g:
-            return True
-        task_keywords = [
-            "list", "dir", "directory", "file", "read", "write", "search", "grep",
-            "run", "execute", "install", "create", "delete", "move", "copy",
-            "project", "code", "repository", "repo", "test", "build", "deploy",
-            "shell", "command", "terminal",
+    def _looks_like_capability_refusal(self, text: str) -> bool:
+        t = text.lower()
+        markers = [
+            "i can't",
+            "i cannot",
+            "i do not have",
+            "as an ai",
+            "i'm unable to",
         ]
-        return not any(k in g for k in task_keywords)
-
-    def _heuristic_tool_for_goal(self, goal: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any] | None:
-        """
-        Deterministic fallback for common local-system intents so the agent
-        stays useful even if the model responds too conversationally.
-        """
-        g = goal.strip().lower()
-        ctx = context or {}
-
-        # Reference resolution: "run it"/"execute it" based on remembered project directory.
-        if any(k in g for k in ["run it", "execute it", "start it", "launch it"]):
-            last_project_dir = str(ctx.get("last_project_dir", "")).strip()
-            if last_project_dir:
-                return {"tool": "shell", "args": {"command": f"cd '{last_project_dir}' && python3 main.py"}}
-            last_cmd = str(ctx.get("last_shell_command", "")).strip()
-            if last_cmd:
-                return {"tool": "shell", "args": {"command": last_cmd}}
-
-        # List directory intents.
-        if any(k in g for k in ["list dir", "list directory", "show files", "read desktop dir", "ls "]):
-            path = "."
-            if "desktop" in g:
-                path = "/home/mayur/Desktop"
-            return {"tool": "list_dir", "args": {"path": path}}
-
-        # Read file intents: "read file X", "open X", "show file X"
-        m = re.search(r"(?:read file|open file|show file|read)\s+(.+)$", g)
-        if m:
-            raw = m.group(1).strip()
-            # keep it simple; do not over-normalize user path
-            return {"tool": "read_file", "args": {"path": raw}}
-
-        # Code search intents
-        m = re.search(r"(?:search code|find in code|grep)\s+(.+)$", g)
-        if m:
-            return {"tool": "search_code", "args": {"pattern": m.group(1).strip(), "path": "."}}
-
-        return None
+        return any(m in t for m in markers)
 
     def _extract_json(self, text: str) -> Dict[str, Any]:
         content = text.strip()
@@ -152,6 +137,18 @@ class UnifiedOrchestrator:
             return self.tools.write_file(str(args.get("path", "")), str(args.get("content", "")))
         if tool_name == "search_code":
             return self.tools.search_code(str(args.get("pattern", "")), str(args.get("path", ".")))
+        if tool_name == "web_search":
+            return self.tools.web_search(
+                str(args.get("query", "")),
+                int(args.get("max_results", 5)),
+            )
+        if tool_name == "fetch_url":
+            return self.tools.fetch_url(
+                str(args.get("url", "")),
+                int(args.get("max_chars", 8000)),
+            )
+        if tool_name == "reply":
+            return self.tools.reply(str(args.get("text", "")))
         if tool_name == "capabilities":
             return self.tools.capabilities()
         return {"success": False, "error": f"unknown tool: {tool_name}"}
@@ -160,84 +157,21 @@ class UnifiedOrchestrator:
         self,
         goal: str,
         confirm_callback: Callable[[str, str], bool],
+        ask_user_callback: Optional[Callable[[str], str]] = None,
         context: Optional[Dict[str, Any]] = None,
     ) -> AgentState:
         state = AgentState(goal=goal)
         if self.logger:
             self.logger.info("goal_received | goal=%s", goal)
-
-        # Direct conversational path for general questions/chitchat.
-        if self._is_general_question(goal):
-            try:
-                if self.logger:
-                    self.logger.info("mode_selected | mode=general")
-                out = self.llm.chat(
-                    [
-                        {"role": "system", "content": self._general_answer_prompt()},
-                        {"role": "user", "content": goal},
-                    ]
-                )
-                state.final_answer = str(out.get("content", "")).strip() or "I do not have an answer right now."
-                if self.logger:
-                    self.logger.info("general_answer_content | content=%s", self._clip(state.final_answer, 1200))
-                state.finished = True
-                state.steps.append(
-                    {
-                        "step": 1,
-                        "type": "answer",
-                        "mode": "general",
-                        "content": state.final_answer,
-                    }
-                )
-                if self.logger:
-                    self.logger.info("goal_completed | mode=general")
-                return state
-            except Exception as exc:
-                state.steps.append({"step": 1, "type": "model_error", "error": str(exc)})
-                state.final_answer = "I hit an error while answering that question."
-                if self.logger:
-                    self.logger.error("general_mode_error | error=%s", str(exc))
-                return state
-
-        # First-pass deterministic handling for common local tasks.
-        heuristic = self._heuristic_tool_for_goal(goal, context=context)
-        if heuristic:
-            if self.logger:
-                self.logger.info(
-                    "mode_selected | mode=heuristic | tool=%s | args=%s",
-                    heuristic["tool"],
-                    self._clip(json.dumps(heuristic.get("args", {}), ensure_ascii=True), 1000),
-                )
-            result = self._run_tool(heuristic["tool"], heuristic["args"], confirm_callback)
-            state.steps.append(
-                {
-                    "step": 1,
-                    "type": "tool",
-                    "tool": heuristic["tool"],
-                    "args": heuristic["args"],
-                    "result": result,
-                }
-            )
-            if result.get("success"):
-                out = result.get("output") or result.get("stdout", "")
-                state.final_answer = str(out).strip() or "Done."
-            else:
-                state.final_answer = f"Tool failed: {result.get('error', 'unknown error')}"
-            state.finished = True
-            if self.logger:
-                self.logger.info(
-                    "goal_completed | mode=heuristic | tool=%s | success=%s | result=%s",
-                    heuristic["tool"],
-                    result.get("success"),
-                    self._clip(json.dumps(result, ensure_ascii=True), 1200),
-                )
-            return state
+        if self.logger:
+            self.logger.info("mode_selected | mode=plan")
 
         for step_idx in range(1, self.max_steps + 1):
+            current_time_iso = datetime.now().astimezone().isoformat()
             if self.logger:
                 self.logger.info("plan_step_start | step=%s", step_idx)
             messages = [
-                {"role": "system", "content": self._system_prompt()},
+                {"role": "system", "content": self._system_prompt(current_time_iso)},
                 {
                     "role": "user",
                     "content": (
@@ -313,6 +247,34 @@ class UnifiedOrchestrator:
                     "result": result,
                 }
             )
+
+            if tool_name == "reply" and result.get("success"):
+                reply_text = str(result.get("output", "")).strip()
+                await_user = bool(args.get("await_user", False))
+                if await_user and ask_user_callback is not None:
+                    user_feedback = ask_user_callback(reply_text)
+                    state.steps.append(
+                        {
+                            "step": step_idx,
+                            "type": "user_input",
+                            "prompt": reply_text,
+                            "response": user_feedback,
+                        }
+                    )
+                    if self.logger:
+                        self.logger.info(
+                            "reply_interaction | prompt=%s | user_response=%s",
+                            self._clip(reply_text, 600),
+                            self._clip(user_feedback, 600),
+                        )
+                    # Continue planning with this new user input embedded in steps context.
+                    continue
+
+                state.final_answer = reply_text
+                state.finished = True
+                if self.logger:
+                    self.logger.info("goal_completed | mode=reply_tool | final_answer=%s", self._clip(state.final_answer, 1200))
+                break
 
         if not state.finished:
             state.final_answer = (
