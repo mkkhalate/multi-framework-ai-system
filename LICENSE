@@ -1,0 +1,33 @@
+Custom Attribution License (CAL) v1.0
+
+Copyright (c) 2026 Mayur
+All rights reserved.
+
+Permission is hereby granted to use, copy, modify, and distribute this software,
+in source or binary form, for personal, educational, or commercial purposes,
+subject to the following conditions:
+
+1. Attribution Required
+Any use of this software, in whole or in part, in a system, product, service,
+repository, publication, demo, or derivative work must include clear and visible
+attribution to the original author:
+"Author: Mayur"
+
+2. Placement of Attribution
+Attribution must appear in at least one of the following:
+- Project README or documentation
+- About page or credits section
+- Source code header in derivative repositories
+- Product/legal notices where third-party software is disclosed
+
+3. No Removal of License
+This license text must be included in all copies or substantial portions of the software.
+
+4. No Warranty
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE, AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT, OR
+OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+
