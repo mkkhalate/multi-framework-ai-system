@@ -23,10 +23,12 @@ Thumbs.db
 *.log
 tmp/
 temp/
+logs/
 
 # Local runtime state (future)
 project_state.json
 *.sqlite3
+.assistant_memory.json
 
 # Large upstream repos cloned for local integration reference
 integrations/

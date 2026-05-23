@@ -5,13 +5,20 @@ from typing import Any, Dict, List
 
 
 class ToolRouter:
-    def __init__(self, workspace_root: Path) -> None:
+    def __init__(self, workspace_root: Path, file_scope_mode: str = "workspace", operation_root: Path | None = None) -> None:
         self.workspace_root = workspace_root.resolve()
+        self.file_scope_mode = file_scope_mode
+        self.operation_root = (operation_root or workspace_root).resolve()
 
     def _resolve_path(self, path: str) -> Path:
         p = Path(path)
         if not p.is_absolute():
-            p = (self.workspace_root / p).resolve()
+            if self.file_scope_mode == "home":
+                p = (Path.home() / p).resolve()
+            elif self.file_scope_mode == "system":
+                p = (self.operation_root / p).resolve()
+            else:
+                p = (self.workspace_root / p).resolve()
         return p
 
     def run_shell(self, command: str) -> Dict[str, Any]:
@@ -83,6 +90,8 @@ class ToolRouter:
             "success": True,
             "output": {
                 "workspace_root": str(self.workspace_root),
+                "file_scope_mode": self.file_scope_mode,
+                "operation_root": str(self.operation_root),
                 "tools": ["shell", "list_dir", "read_file", "write_file", "search_code"],
                 "browser_use_repo_present": browser_use_repo.exists(),
             },

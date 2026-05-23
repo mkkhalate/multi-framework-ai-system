@@ -1,7 +1,8 @@
 import json
+import logging
 import re
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from policy import SafetyPolicy
 from provider_adapter import OllamaCloudAdapter
@@ -23,11 +24,19 @@ class UnifiedOrchestrator:
         tools: ToolRouter,
         policy: SafetyPolicy,
         max_steps: int = 8,
+        logger: logging.Logger | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
         self.policy = policy
         self.max_steps = max_steps
+        self.logger = logger
+
+    def _clip(self, value: Any, limit: int = 400) -> str:
+        text = str(value)
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "...<truncated>"
 
     def _system_prompt(self) -> str:
         return (
@@ -63,12 +72,22 @@ class UnifiedOrchestrator:
         ]
         return not any(k in g for k in task_keywords)
 
-    def _heuristic_tool_for_goal(self, goal: str) -> Dict[str, Any] | None:
+    def _heuristic_tool_for_goal(self, goal: str, context: Optional[Dict[str, Any]] = None) -> Dict[str, Any] | None:
         """
         Deterministic fallback for common local-system intents so the agent
         stays useful even if the model responds too conversationally.
         """
         g = goal.strip().lower()
+        ctx = context or {}
+
+        # Reference resolution: "run it"/"execute it" based on remembered project directory.
+        if any(k in g for k in ["run it", "execute it", "start it", "launch it"]):
+            last_project_dir = str(ctx.get("last_project_dir", "")).strip()
+            if last_project_dir:
+                return {"tool": "shell", "args": {"command": f"cd '{last_project_dir}' && python3 main.py"}}
+            last_cmd = str(ctx.get("last_shell_command", "")).strip()
+            if last_cmd:
+                return {"tool": "shell", "args": {"command": last_cmd}}
 
         # List directory intents.
         if any(k in g for k in ["list dir", "list directory", "show files", "read desktop dir", "ls "]):
@@ -137,12 +156,21 @@ class UnifiedOrchestrator:
             return self.tools.capabilities()
         return {"success": False, "error": f"unknown tool: {tool_name}"}
 
-    def run_goal(self, goal: str, confirm_callback: Callable[[str, str], bool]) -> AgentState:
+    def run_goal(
+        self,
+        goal: str,
+        confirm_callback: Callable[[str, str], bool],
+        context: Optional[Dict[str, Any]] = None,
+    ) -> AgentState:
         state = AgentState(goal=goal)
+        if self.logger:
+            self.logger.info("goal_received | goal=%s", goal)
 
         # Direct conversational path for general questions/chitchat.
         if self._is_general_question(goal):
             try:
+                if self.logger:
+                    self.logger.info("mode_selected | mode=general")
                 out = self.llm.chat(
                     [
                         {"role": "system", "content": self._general_answer_prompt()},
@@ -150,6 +178,8 @@ class UnifiedOrchestrator:
                     ]
                 )
                 state.final_answer = str(out.get("content", "")).strip() or "I do not have an answer right now."
+                if self.logger:
+                    self.logger.info("general_answer_content | content=%s", self._clip(state.final_answer, 1200))
                 state.finished = True
                 state.steps.append(
                     {
@@ -159,15 +189,25 @@ class UnifiedOrchestrator:
                         "content": state.final_answer,
                     }
                 )
+                if self.logger:
+                    self.logger.info("goal_completed | mode=general")
                 return state
             except Exception as exc:
                 state.steps.append({"step": 1, "type": "model_error", "error": str(exc)})
                 state.final_answer = "I hit an error while answering that question."
+                if self.logger:
+                    self.logger.error("general_mode_error | error=%s", str(exc))
                 return state
 
         # First-pass deterministic handling for common local tasks.
-        heuristic = self._heuristic_tool_for_goal(goal)
+        heuristic = self._heuristic_tool_for_goal(goal, context=context)
         if heuristic:
+            if self.logger:
+                self.logger.info(
+                    "mode_selected | mode=heuristic | tool=%s | args=%s",
+                    heuristic["tool"],
+                    self._clip(json.dumps(heuristic.get("args", {}), ensure_ascii=True), 1000),
+                )
             result = self._run_tool(heuristic["tool"], heuristic["args"], confirm_callback)
             state.steps.append(
                 {
@@ -184,15 +224,25 @@ class UnifiedOrchestrator:
             else:
                 state.final_answer = f"Tool failed: {result.get('error', 'unknown error')}"
             state.finished = True
+            if self.logger:
+                self.logger.info(
+                    "goal_completed | mode=heuristic | tool=%s | success=%s | result=%s",
+                    heuristic["tool"],
+                    result.get("success"),
+                    self._clip(json.dumps(result, ensure_ascii=True), 1200),
+                )
             return state
 
         for step_idx in range(1, self.max_steps + 1):
+            if self.logger:
+                self.logger.info("plan_step_start | step=%s", step_idx)
             messages = [
                 {"role": "system", "content": self._system_prompt()},
                 {
                     "role": "user",
                     "content": (
                         f"Goal: {goal}\n"
+                        f"Context: {json.dumps(context or {}, ensure_ascii=True)}\n"
                         f"Previous steps JSON: {json.dumps(state.steps, ensure_ascii=True)}"
                     ),
                 },
@@ -200,7 +250,16 @@ class UnifiedOrchestrator:
 
             try:
                 model_out = self.llm.chat(messages)
+                if self.logger:
+                    self.logger.info("model_raw_content | step=%s | content=%s", step_idx, self._clip(model_out.get("content", ""), 1400))
                 action = self._extract_json(model_out["content"])
+                if self.logger:
+                    self.logger.info(
+                        "plan_step_action | step=%s | action_type=%s | action=%s",
+                        step_idx,
+                        action.get("type"),
+                        self._clip(json.dumps(action, ensure_ascii=True), 1400),
+                    )
             except Exception as exc:
                 err = str(exc)
                 state.steps.append(
@@ -236,6 +295,15 @@ class UnifiedOrchestrator:
                 args = {}
 
             result = self._run_tool(tool_name, args, confirm_callback)
+            if self.logger:
+                self.logger.info(
+                    "tool_executed | step=%s | tool=%s | args=%s | success=%s | result=%s",
+                    step_idx,
+                    tool_name,
+                    self._clip(json.dumps(args, ensure_ascii=True), 1200),
+                    result.get("success"),
+                    self._clip(json.dumps(result, ensure_ascii=True), 1400),
+                )
             state.steps.append(
                 {
                     "step": step_idx,
@@ -251,4 +319,8 @@ class UnifiedOrchestrator:
                 "I could not complete the task within the configured step budget. "
                 "Try a more specific goal or increase AGENT_MAX_STEPS."
             )
+            if self.logger:
+                self.logger.warning("goal_incomplete | goal=%s", goal)
+        elif self.logger:
+            self.logger.info("goal_completed | mode=plan | final_answer=%s", self._clip(state.final_answer, 1200))
         return state

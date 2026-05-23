@@ -15,6 +15,8 @@ class Settings:
     mcp_config_path: Path
     approval_mode: str
     workspace_root: str
+    file_scope_mode: str
+    operation_root: str
 
 
 def _to_bool(value: str) -> bool:
@@ -33,4 +35,6 @@ def load_settings() -> Settings:
         mcp_config_path=Path(os.getenv("MCP_CONFIG_PATH", "./config/mcp_servers.json")),
         approval_mode=os.getenv("MCP_APPROVAL_MODE", "ask").strip().lower(),
         workspace_root=os.getenv("WORKSPACE_ROOT", "."),
+        file_scope_mode=os.getenv("FILE_SCOPE_MODE", "workspace").strip().lower(),
+        operation_root=os.getenv("OPERATION_ROOT", os.getenv("WORKSPACE_ROOT", ".")),
     )
